@@ -320,7 +320,18 @@ LRESULT TaskbarAttributeWorker::OnRequestAttributeRefresh(LPARAM lParam)
 
 LRESULT TaskbarAttributeWorker::MessageHandler(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	if (uMsg == WM_SETTINGCHANGE)
+	if (uMsg == DesktopChangedMessage)
+	{
+		OnVirtualDesktopChanged();
+		return 0;
+	}
+	else if (uMsg == WM_TIMER && wParam == DesktopRetryTimer)
+	{
+		ConnectVirtualDesktops();
+		RefreshAllAttributes();
+		return 0;
+	}
+	else if (uMsg == WM_SETTINGCHANGE)
 	{
 		if (InSendMessage())
 		{
@@ -395,6 +406,48 @@ LRESULT TaskbarAttributeWorker::MessageHandler(UINT uMsg, WPARAM wParam, LPARAM 
 }
 
 TaskbarAppearance TaskbarAttributeWorker::GetConfig(taskbar_iterator taskbar) const
+{
+	const auto appearance = GetStateConfig(taskbar);
+	if (const auto &desktop = m_DesktopManager.Current())
+	{
+		if (m_DesktopColorPreview && IsEqualGUID(m_DesktopColorPreview->first, desktop->Id))
+			return VirtualDesktopColors::Apply(appearance, m_DesktopColorPreview->second);
+		return VirtualDesktopColors::Apply(appearance, m_ConfigManager.GetConfig().DesktopColors.Find(desktop->Id));
+	}
+	return appearance;
+}
+
+void TaskbarAttributeWorker::ConnectVirtualDesktops()
+{
+	const HRESULT previousError = m_DesktopManager.LastError();
+	const HRESULT hr = m_DesktopManager.Connect(handle(), DesktopChangedMessage);
+	if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))
+	{
+		if (hr != previousError)
+		{
+			HresultHandle(hr, spdlog::level::info, L"Virtual desktop detection unavailable; using global appearances");
+		}
+		SetTimer(handle(), DesktopRetryTimer, 5000, nullptr);
+	}
+	else
+	{
+		KillTimer(handle(), DesktopRetryTimer);
+	}
+}
+
+void TaskbarAttributeWorker::OnVirtualDesktopChanged()
+{
+	// CurrentDesktopChanged and DesktopSwitched can arrive together. Query the
+	// latest snapshot on our thread rather than retaining callback COM pointers.
+	if (FAILED(m_DesktopManager.Refresh()))
+	{
+		SetTimer(handle(), DesktopRetryTimer, 5000, nullptr);
+	}
+	else KillTimer(handle(), DesktopRetryTimer);
+	RefreshAllAttributes();
+}
+
+TaskbarAppearance TaskbarAttributeWorker::GetStateConfig(taskbar_iterator taskbar) const
 {
 	const auto& config = m_ConfigManager.GetConfig();
 
@@ -1507,6 +1560,7 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 
 		CreateSearchManager();
 		CreateTaskViewManager();
+		ConnectVirtualDesktops();
 
 		// This might race but it's not an issue because
 		// it'll race on a single thread and only ends up
@@ -1576,6 +1630,8 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 
 TaskbarAttributeWorker::~TaskbarAttributeWorker() noexcept(false)
 {
+	KillTimer(handle(), DesktopRetryTimer);
+	m_DesktopManager.Disconnect();
 	m_disableAttributeRefreshReply = true;
 	UnregisterTaskViewCallbacks();
 	UnregisterSearchCallbacks();
