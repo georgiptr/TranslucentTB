@@ -23,6 +23,72 @@ namespace {
 		HRESULT STDMETHODCALLTYPE DesktopSwitched(VirtualDesktopAbi::Desktop *) override { return Changed(); }
 		HRESULT STDMETHODCALLTYPE RemoteDesktopConnected(VirtualDesktopAbi::Desktop *) override { return Changed(); }
 	};
+
+	HRESULT ReadDesktopInfo(IObjectArray *desktops, UINT index, VirtualDesktopInfo &info)
+	{
+		Microsoft::WRL::ComPtr<VirtualDesktopAbi::Desktop> desktop;
+		HRESULT hr = desktops->GetAt(index, IID_PPV_ARGS(&desktop));
+		if (FAILED(hr)) return hr;
+		if (!desktop) return E_UNEXPECTED;
+
+		info.Position = index + 1;
+		hr = desktop->GetId(&info.Id);
+		if (FAILED(hr)) return hr;
+
+		wil::unique_hstring name;
+		if (SUCCEEDED(desktop->GetName(name.put())))
+		{
+			UINT length = 0;
+			const auto text = WindowsGetStringRawBuffer(name.get(), &length);
+			if (text)
+			{
+				info.Name.assign(text, length);
+			}
+		}
+		if (info.Name.empty())
+		{
+			info.Name = L"Desktop " + std::to_wstring(info.Position);
+		}
+		return S_OK;
+	}
+
+	HRESULT GetCurrentDesktopId(VirtualDesktopAbi::Manager *manager, GUID &id)
+	{
+		Microsoft::WRL::ComPtr<VirtualDesktopAbi::Desktop> desktop;
+		const HRESULT hr = manager->GetCurrentDesktop(&desktop);
+		if (FAILED(hr)) return hr;
+		if (!desktop) return E_UNEXPECTED;
+		return desktop->GetId(&id);
+	}
+
+	HRESULT ReadDesktopSnapshot(VirtualDesktopAbi::Manager *manager,
+		std::vector<VirtualDesktopInfo> &snapshot, std::optional<VirtualDesktopInfo> &active)
+	{
+		GUID currentId{};
+		HRESULT hr = GetCurrentDesktopId(manager, currentId);
+		if (FAILED(hr)) return hr;
+
+		Microsoft::WRL::ComPtr<IObjectArray> desktops;
+		hr = manager->GetDesktops(&desktops);
+		if (FAILED(hr)) return hr;
+		if (!desktops) return E_UNEXPECTED;
+
+		UINT count = 0;
+		hr = desktops->GetCount(&count);
+		if (FAILED(hr)) return hr;
+		for (UINT i = 0; i < count; ++i)
+		{
+			VirtualDesktopInfo info;
+			hr = ReadDesktopInfo(desktops.Get(), i, info);
+			if (FAILED(hr)) return hr;
+			if (IsEqualGUID(info.Id, currentId))
+			{
+				active = info;
+			}
+			snapshot.push_back(std::move(info));
+		}
+		return active ? S_OK : HRESULT_FROM_WIN32(ERROR_RETRY);
+	}
 }
 
 VirtualDesktopManager::~VirtualDesktopManager()
@@ -87,63 +153,9 @@ HRESULT VirtualDesktopManager::Refresh()
 	{
 		return m_LastError = E_UNEXPECTED;
 	}
-	Microsoft::WRL::ComPtr<VirtualDesktopAbi::Desktop> current;
-	Microsoft::WRL::ComPtr<IObjectArray> desktops;
-	GUID currentId{};
-	UINT count = 0;
-	HRESULT hr = m_Manager->GetCurrentDesktop(&current);
-	if (SUCCEEDED(hr) && current) hr = current->GetId(&currentId);
-	else if (SUCCEEDED(hr)) hr = E_UNEXPECTED;
-	if (SUCCEEDED(hr)) hr = m_Manager->GetDesktops(&desktops);
-	if (SUCCEEDED(hr) && desktops) hr = desktops->GetCount(&count);
-	else if (SUCCEEDED(hr)) hr = E_UNEXPECTED;
-
 	std::vector<VirtualDesktopInfo> snapshot;
 	std::optional<VirtualDesktopInfo> active;
-	for (UINT i = 0; SUCCEEDED(hr) && i < count; ++i)
-	{
-		Microsoft::WRL::ComPtr<VirtualDesktopAbi::Desktop> desktop;
-		hr = desktops->GetAt(i, IID_PPV_ARGS(&desktop));
-		if (FAILED(hr))
-		{
-			break;
-		}
-		if (!desktop)
-		{
-			hr = E_UNEXPECTED;
-			break;
-		}
-		VirtualDesktopInfo info;
-		info.Position = i + 1;
-		hr = desktop->GetId(&info.Id);
-		if (FAILED(hr))
-		{
-			break;
-		}
-		wil::unique_hstring name;
-		if (SUCCEEDED(desktop->GetName(name.put())))
-		{
-			UINT length = 0;
-			const auto text = WindowsGetStringRawBuffer(name.get(), &length);
-			if (text)
-			{
-				info.Name.assign(text, length);
-			}
-		}
-		if (info.Name.empty())
-		{
-			info.Name = L"Desktop " + std::to_wstring(info.Position);
-		}
-		if (IsEqualGUID(info.Id, currentId))
-		{
-			active = info;
-		}
-		snapshot.push_back(std::move(info));
-	}
-	if (SUCCEEDED(hr) && !active)
-	{
-		hr = HRESULT_FROM_WIN32(ERROR_RETRY);
-	}
+	const HRESULT hr = ReadDesktopSnapshot(m_Manager.Get(), snapshot, active);
 	if (SUCCEEDED(hr))
 	{
 		m_Desktops = std::move(snapshot);

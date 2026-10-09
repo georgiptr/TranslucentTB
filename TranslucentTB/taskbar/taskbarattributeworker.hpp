@@ -186,6 +186,12 @@ private:
 	// Config
 	TaskbarAppearance GetConfig(taskbar_iterator taskbar) const;
 	TaskbarAppearance GetStateConfig(taskbar_iterator taskbar) const;
+	TaskbarAppearance GetWindowConfig(taskbar_iterator taskbar) const;
+	std::optional<TaskbarAppearance> GetStartOrSearchConfig(taskbar_iterator taskbar) const;
+	TaskbarAppearance GetVisibleWindowConfig(taskbar_iterator taskbar) const;
+	TaskbarAppearance GetMaximisedWindowConfig(taskbar_iterator taskbar) const;
+	bool IsSearchOpenedOnMonitor(HMONITOR monitor) const;
+	bool IsStartOpenedOnMonitor(HMONITOR monitor) const;
 	void ConnectVirtualDesktops();
 	void OnVirtualDesktopChanged();
 
